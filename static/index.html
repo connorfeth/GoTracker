@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transit Info</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { margin-bottom: 0.25rem; }
+    select { font-size: 1rem; padding: 0.4rem; min-width: 300px; max-width: 100%; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1.25rem; }
+    th, td { text-align: left; padding: 0.6rem; border-bottom: 1px solid #ddd; }
+    th { background: #f4f4f4; }
+    .msg { margin-top: 1rem; color: #666; }
+    .error { color: #b00020; }
+    #updated { font-size: 0.85rem; color: #888; margin-top: 0.5rem; }
+    #info { margin-top: 1.25rem; padding: 0.75rem 1rem; background: #f8f8f8; border-radius: 6px; }
+    #info h2 { margin: 0 0 0.25rem; font-size: 1.1rem; }
+    #info p { margin: 0.25rem 0; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h1>Transit Info</h1>
+  <label for="stop">Choose a stop / station:</label><br>
+  <select id="stop"><option value="">Loading stops…</option></select>
+
+  <div id="destWrap" style="margin-top: 0.75rem;" hidden>
+    <label for="dest">Trains heading to (optional):</label><br>
+    <select id="dest"><option value="">All trains</option></select>
+  </div>
+
+  <div id="info" hidden></div>
+  <div id="message" class="msg"></div>
+  <table id="table" hidden>
+    <thead>
+      <tr><th>Line</th><th>Direction</th><th>Scheduled</th><th>Expected</th><th>Platform</th><th>Status</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="updated"></div>
+
+  <script>
+    const stopSelect = document.getElementById("stop");
+    const table = document.getElementById("table");
+    const rows = document.getElementById("rows");
+    const info = document.getElementById("info");
+    const message = document.getElementById("message");
+    const updated = document.getElementById("updated");
+    const destSelect = document.getElementById("dest");
+    const destWrap = document.getElementById("destWrap");
+    const REFRESH_MS = 30000;
+    let timer = null;
+
+    function showMessage(text, isError = false) {
+      message.textContent = text;
+      message.className = "msg" + (isError ? " error" : "");
+    }
+
+    function addP(parent, text) {
+      const p = document.createElement("p");
+      p.textContent = text;
+      parent.appendChild(p);
+    }
+
+    async function loadStops() {
+      try {
+        const res = await fetch("/api/stops");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to load stops");
+        stopSelect.innerHTML = "";
+        stopSelect.add(new Option("-- select --", ""));
+        for (const s of data) {
+          const label = s.type ? `${s.name} (${s.type})` : s.name;
+          stopSelect.add(new Option(label, s.id));
+        }
+      } catch (err) {
+        stopSelect.innerHTML = '<option value="">Unavailable</option>';
+        showMessage(err.message, true);
+      }
+    }
+
+    async function loadDetails() {
+      const id = stopSelect.value;
+      try {
+        const res = await fetch(`/api/stops/${encodeURIComponent(id)}/details`);
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error);
+        info.innerHTML = "";
+        const h = document.createElement("h2");
+        h.textContent = d.name || "";
+        info.appendChild(h);
+        if (d.address) addP(info, d.address);
+        if (d.facilities?.length) addP(info, "Facilities: " + d.facilities.join(", "));
+        if (d.parking?.length) {
+          addP(info, "Parking: " + d.parking.map(p => `${p.name} (${p.spots ?? "?"} spots)`).join(", "));
+        }
+        info.hidden = false;
+      } catch {
+        info.hidden = true;   // details are optional; departures still show
+      }
+    }
+
+    async function loadDestinations() {
+      const id = stopSelect.value;
+      destSelect.innerHTML = '<option value="">All trains</option>';
+      try {
+        const res = await fetch(`/api/stops/${encodeURIComponent(id)}/destinations`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        for (const d of data) destSelect.add(new Option(d.name, d.id));
+        destWrap.hidden = data.length === 0;
+      } catch {
+        destWrap.hidden = true;   // optional filter; departures still show without it
+      }
+    }
+
+    async function loadDepartures() {
+      const id = stopSelect.value;
+      if (!id) { table.hidden = true; showMessage(""); return; }
+      try {
+        let url = `/api/stops/${encodeURIComponent(id)}/departures`;
+        if (destSelect.value) url += `?to=${encodeURIComponent(destSelect.value)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to load departures");
+
+        rows.innerHTML = "";
+        if (data.length === 0) {
+          table.hidden = true;
+          showMessage("No upcoming departures.");
+          return;
+        }
+        for (const d of data) {
+          const tr = document.createElement("tr");
+          for (const key of ["line", "direction", "scheduled", "expected", "platform", "status"]) {
+            const td = document.createElement("td");
+            td.textContent = d[key] ?? "";   // textContent avoids injecting HTML
+            tr.appendChild(td);
+          }
+          rows.appendChild(tr);
+        }
+        table.hidden = false;
+        showMessage("");
+        updated.textContent = "Last updated: " + new Date().toLocaleTimeString();
+      } catch (err) {
+        table.hidden = true;
+        showMessage(err.message, true);
+      }
+    }
+
+    stopSelect.addEventListener("change", () => {
+      clearInterval(timer);
+      info.hidden = true;
+      destWrap.hidden = true;
+      destSelect.innerHTML = '<option value="">All trains</option>';
+      loadDepartures();
+      if (stopSelect.value) {
+        loadDetails();
+        loadDestinations();
+        timer = setInterval(loadDepartures, REFRESH_MS);
+      }
+    });
+
+    destSelect.addEventListener("change", loadDepartures);
+
+    loadStops();
+  </script>
+</body>
+</html>
